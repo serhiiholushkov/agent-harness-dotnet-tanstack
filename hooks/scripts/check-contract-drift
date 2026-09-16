@@ -1,0 +1,57 @@
+#!/bin/sh
+# check-contract-drift — verify committed OpenAPI docs and generated client are current.
+# Part of the harness hooks; see ../README.md for wiring.
+set -u
+
+usage() {
+  cat <<'EOF'
+check-contract-drift — regenerate the contract artifacts and fail on any diff.
+
+Runs, from the repository root:
+  pnpm turbo run build generate
+  git diff --exit-code -- apps/api/openapi packages/api-client/src
+
+A non-empty diff means an endpoint changed without regenerating, a generated
+file was hand-edited, or toolchain versions drifted from the pins. Fix by
+reverting hand edits, regenerating, and committing the outputs together with
+the change that caused them (see skills/regenerate-api-client).
+
+Usage:
+  check-contract-drift            run the check
+  check-contract-drift --quiet    suppress build output, print only the verdict
+  check-contract-drift --help     this text
+
+Exit codes: 0 no drift · 1 drift or build failure · 64 usage error.
+EOF
+}
+
+quiet=0
+case "${1:-}" in
+  --help | -h) usage; exit 0 ;;
+  --quiet | -q) quiet=1 ;;
+  "") : ;;
+  *) usage >&2; exit 64 ;;
+esac
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "check-contract-drift: not a git repository" >&2; exit 64; }
+cd "$root" || exit 64
+command -v pnpm >/dev/null 2>&1 || { echo "check-contract-drift: pnpm not found" >&2; exit 64; }
+
+if [ "$quiet" = 1 ]; then
+  pnpm turbo run build generate >/dev/null 2>&1
+else
+  pnpm turbo run build generate
+fi || { echo "check-contract-drift: build/generate failed — fix the build first" >&2; exit 1; }
+
+if git diff --exit-code -- apps/api/openapi packages/api-client/src; then
+  echo "check-contract-drift: OK — contract artifacts are current"
+  exit 0
+fi
+
+cat >&2 <<'EOF'
+check-contract-drift: DRIFT — committed contract artifacts differ after regeneration.
+The diff above is the real contract state. Review it, then commit the regenerated
+files together with the endpoint change (never hand-edit them). See
+skills/regenerate-api-client for triage.
+EOF
+exit 1

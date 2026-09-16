@@ -1,0 +1,41 @@
+#!/bin/sh
+# verify-gate — the full PR gate, for pre-push or session-end wiring.
+# Part of the harness hooks; see ../README.md for wiring.
+set -u
+
+usage() {
+  cat <<'EOF'
+verify-gate — run the complete verification gate.
+
+Runs `pnpm verify` from the repository root: turbo lint, typecheck, test, and
+build across both toolchains, plus the contract drift check. This is the same
+gate CI runs; green here means the push is safe.
+
+Usage:
+  verify-gate           run the gate
+  verify-gate --help    this text
+
+Exit codes: 0 gate passed · 1 gate failed · 64 usage error.
+On failure, triage with skills/fix-verify-failures — fix causes, never gates:
+no skipped tests, no loosened rules, no hand-edited generated files, no
+--no-verify.
+EOF
+}
+
+case "${1:-}" in
+  --help | -h) usage; exit 0 ;;
+  "") : ;;
+  *) usage >&2; exit 64 ;;
+esac
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "verify-gate: not a git repository" >&2; exit 64; }
+cd "$root" || exit 64
+command -v pnpm >/dev/null 2>&1 || { echo "verify-gate: pnpm not found" >&2; exit 64; }
+
+if pnpm verify; then
+  echo "verify-gate: OK — all gates green"
+  exit 0
+fi
+
+echo "verify-gate: FAILED — triage the first failing task per skills/fix-verify-failures" >&2
+exit 1

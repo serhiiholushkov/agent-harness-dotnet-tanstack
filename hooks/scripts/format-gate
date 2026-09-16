@@ -1,0 +1,77 @@
+#!/bin/sh
+# format-gate — formatting check for staged or all files, both toolchains.
+# Part of the harness hooks; see ../README.md for wiring.
+set -u
+
+usage() {
+  cat <<'EOF'
+format-gate — verify formatting without changing files.
+
+C# : dotnet format Api.slnx --verify-no-changes (in apps/api), scoped to the
+     selected .cs files when possible.
+TS/web : prettier --check on the selected files (respects .prettierignore).
+
+Usage:
+  format-gate             check files staged in git (pre-commit wiring)
+  format-gate --all       check the whole repository (CI wiring)
+  format-gate --help      this text
+
+Exit codes: 0 clean · 1 formatting needed or tool failure · 64 usage error.
+Fix with: (cd apps/api && dotnet format Api.slnx) and pnpm exec prettier --write.
+Never commit with --no-verify to skip this gate.
+EOF
+}
+
+mode=staged
+case "${1:-}" in
+  --help | -h) usage; exit 0 ;;
+  --all | -a) mode=all ;;
+  "") : ;;
+  *) usage >&2; exit 64 ;;
+esac
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "format-gate: not a git repository" >&2; exit 64; }
+cd "$root" || exit 64
+
+fail=0
+
+# --- C# ---------------------------------------------------------------------
+if [ -f apps/api/Api.slnx ]; then
+  cs_args=""
+  if [ "$mode" = staged ]; then
+    # dotnet format --include takes paths relative to the solution directory.
+    cs_args=$(git diff --cached --name-only --diff-filter=ACMR -- 'apps/api/*.cs' \
+      | sed 's|^apps/api/||' | tr '\n' ' ')
+  fi
+  if [ "$mode" = all ] || [ -n "${cs_args# }" ]; then
+    command -v dotnet >/dev/null 2>&1 || { echo "format-gate: dotnet not found" >&2; exit 64; }
+    # shellcheck disable=SC2086 — word splitting of the include list is intended
+    if ! (cd apps/api && dotnet format Api.slnx --verify-no-changes ${cs_args:+--include $cs_args}); then
+      echo "format-gate: C# formatting needed — run: (cd apps/api && dotnet format Api.slnx)" >&2
+      fail=1
+    fi
+  fi
+fi
+
+# --- Prettier ---------------------------------------------------------------
+if [ "$mode" = staged ]; then
+  ts_files=$(git diff --cached --name-only --diff-filter=ACMR \
+    -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.json' '*.css' '*.md' '*.yml' '*.yaml')
+  if [ -n "$ts_files" ]; then
+    command -v pnpm >/dev/null 2>&1 || { echo "format-gate: pnpm not found" >&2; exit 64; }
+    # shellcheck disable=SC2086 — file list is newline-safe for typical repo paths
+    if ! pnpm exec prettier --check --ignore-unknown $ts_files; then
+      echo "format-gate: Prettier formatting needed — run: pnpm exec prettier --write <files>" >&2
+      fail=1
+    fi
+  fi
+else
+  command -v pnpm >/dev/null 2>&1 || { echo "format-gate: pnpm not found" >&2; exit 64; }
+  if ! pnpm exec prettier --check --ignore-unknown .; then
+    echo "format-gate: Prettier formatting needed — run: pnpm exec prettier --write ." >&2
+    fail=1
+  fi
+fi
+
+[ "$fail" = 0 ] && echo "format-gate: OK"
+exit "$fail"

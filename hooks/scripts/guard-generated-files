@@ -1,0 +1,116 @@
+#!/bin/sh
+# guard-generated-files — reject edits to files owned by code generators.
+# Part of the harness hooks; see ../README.md for wiring.
+set -u
+
+usage() {
+  cat <<'EOF'
+guard-generated-files — reject edits to generated or applied-migration files.
+
+Protected (always, any mode):
+  *.gen.ts                          generated TypeScript (api-client, routeTree)
+  apps/api/openapi/*.json           committed OpenAPI documents
+Protected when the file already exists in HEAD:
+  **/Database/Migrations/*.cs       applied EF Core migrations and snapshots
+
+Usage:
+  guard-generated-files [path ...]     check explicit paths (agent edit guard);
+                                       exit 2 and print the violation if any
+                                       path is protected
+  guard-generated-files --stdin-json   read a JSON tool payload on stdin and
+                                       check every "file_path"/"filePath"
+                                       value in it (Claude Code and VS Code
+                                       PreToolUse wiring)
+  guard-generated-files --staged       check the git index: modified/deleted
+                                       files under Database/Migrations (git
+                                       pre-commit wiring; regenerated *.gen.ts
+                                       and openapi docs are legitimate commits
+                                       — drift is caught by check-contract-drift)
+  guard-generated-files --help         this text
+
+Exit codes: 0 ok · 2 violation · 64 usage error.
+Generated files change only through the pipeline (dotnet build, pnpm generate,
+dotnet ef migrations add). Fix the source, regenerate, never hand-edit.
+EOF
+}
+
+is_generated() {
+  case "$1" in
+    *.gen.ts) return 0 ;;
+    apps/api/openapi/*.json | */apps/api/openapi/*.json) return 0 ;;
+  esac
+  return 1
+}
+
+is_migration() {
+  case "$1" in
+    */Database/Migrations/*.cs) return 0 ;;
+  esac
+  return 1
+}
+
+repo_relative() {
+  # Best effort: strip the repo root prefix from an absolute path.
+  if root=$(git rev-parse --show-toplevel 2>/dev/null); then
+    case "$1" in
+      "$root"/*) printf '%s\n' "${1#"$root"/}"; return ;;
+    esac
+  fi
+  printf '%s\n' "$1"
+}
+
+fail=0
+violate() {
+  echo "BLOCKED: $1 — $2" >&2
+  fail=2
+}
+
+check_path() {
+  rel=$(repo_relative "$1")
+  if is_generated "$rel"; then
+    violate "$rel" "generated file; change the C# source or run the codegen pipeline instead"
+  elif is_migration "$rel"; then
+    # Only files already known to git are protected; new migrations are fine.
+    if git cat-file -e "HEAD:$rel" 2>/dev/null; then
+      violate "$rel" "existing migration/snapshot; add a new migration instead of editing an applied one"
+    fi
+  fi
+}
+
+case "${1:-}" in
+  --help | -h) usage; exit 0 ;;
+  --staged)
+    git rev-parse --git-dir >/dev/null 2>&1 || { echo "guard-generated-files: not a git repository" >&2; exit 64; }
+    # Only mutations of existing migrations are violations at commit time.
+    staged=$(git diff --cached --name-status)
+    tab=$(printf '\t')
+    while IFS="$tab" read -r st path renamed; do
+      [ -z "$st" ] && continue
+      case "$st" in
+        M* | D*) : ;;
+        R*) path=${renamed:-$path} ;;
+        *) continue ;;
+      esac
+      if is_migration "$path"; then
+        violate "$path" "applied migrations are immutable; add a new migration instead"
+      fi
+    done <<EOF
+$staged
+EOF
+    exit $fail
+    ;;
+  --stdin-json)
+    # Dependency-free extraction of "file_path"/"filePath" values from the payload.
+    paths=$(sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p; s/.*"filePath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sort -u)
+    [ -z "$paths" ] && exit 0
+    for p in $paths; do check_path "$p"; done
+    exit $fail
+    ;;
+  "")
+    usage >&2; exit 64
+    ;;
+  *)
+    for p in "$@"; do check_path "$p"; done
+    exit $fail
+    ;;
+esac
